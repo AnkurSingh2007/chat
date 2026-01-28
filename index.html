@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serverless Random Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+    
+    <style>
+        body { background-color: #0f172a; color: white; font-family: 'Courier New', monospace; }
+        .cyber-border { border: 1px solid #00ff41; box-shadow: 0 0 10px #00ff41; }
+        .cyber-text { color: #00ff41; text-shadow: 0 0 5px #00ff41; }
+        video { transform: scaleX(-1); background: #000; object-fit: cover; }
+    </style>
+</head>
+<body class="h-screen flex flex-col items-center justify-center p-4">
+
+    <div class="mb-6 text-center">
+        <h1 class="text-3xl font-bold cyber-text">DECENTRALIZED_MEET</h1>
+        <p class="text-xs text-gray-400 mt-2">NO SERVER • NO DATABASE • PURE P2P</p>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-4xl h-[50vh] md:h-[60vh]">
+        
+        <div class="relative w-full h-full border-2 border-dashed border-gray-700 rounded-lg overflow-hidden flex items-center justify-center bg-black/50">
+            <video id="remoteVideo" autoplay playsinline class="w-full h-full"></video>
+            <div id="status" class="absolute text-center px-4">
+                <div class="text-gray-500 animate-pulse">WAITING FOR SIGNAL...</div>
+            </div>
+        </div>
+
+        <div class="relative w-full h-full border border-gray-700 rounded-lg overflow-hidden bg-black/50">
+            <video id="localVideo" autoplay muted playsinline class="w-full h-full"></video>
+            <div class="absolute bottom-2 left-2 bg-black/80 px-2 py-1 text-xs text-[#00ff41]">YOU</div>
+        </div>
+
+    </div>
+
+    <div class="mt-8 flex gap-4">
+        <button onclick="joinMesh()" id="joinBtn" 
+            class="cyber-border bg-green-900/20 hover:bg-green-900/40 text-green-400 px-8 py-3 rounded text-xl font-bold transition">
+            [ JOIN INFINITY MESH ]
+        </button>
+        <button onclick="location.reload()" class="border border-red-500 text-red-500 px-6 py-3 rounded hover:bg-red-900/20">
+            DISCONNECT
+        </button>
+    </div>
+
+    <script>
+        // 1. SETUP GUN (The "Serverless" Database)
+        // We use a public relay node to bootstrap (required for WebRTC signaling)
+        const gun = Gun(['https://gun-manhattan.herokuapp.com/gun']);
+        const lobby = gun.get('random_chat_lobby_v1'); // The shared room
+
+        // 2. SETUP VARS
+        let peer, localStream, myId;
+        const remoteVideo = document.getElementById('remoteVideo');
+        const statusMsg = document.getElementById('status');
+        let connected = false;
+
+        // 3. START
+        async function joinMesh() {
+            document.getElementById('joinBtn').disabled = true;
+            document.getElementById('joinBtn').innerText = "SCANNING NETWORK...";
+            
+            // Get Camera
+            localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            document.getElementById('localVideo').srcObject = localStream;
+
+            // Initialize PeerJS
+            peer = new Peer(null, { debug: 1 });
+
+            peer.on('open', (id) => {
+                myId = id;
+                console.log("My Peer ID:", id);
+                checkForPeers();
+            });
+
+            // Handle incoming calls
+            peer.on('call', (call) => {
+                if (connected) return; // Busy
+                answerCall(call);
+            });
+        }
+
+        // 4. THE MATCHING LOGIC
+        function checkForPeers() {
+            let foundPartner = false;
+
+            // Look at the lobby data
+            lobby.map().once((peerId, key) => {
+                if (foundPartner || connected) return;
+                
+                // If we see a Peer ID that is NOT us, and it's "fresh"
+                if (peerId && peerId !== myId) {
+                    // Simple "Coin Toss" Logic to decide who calls who
+                    // In a real app, we'd use timestamps, but this works for simple matching
+                    if (myId > peerId) {
+                        console.log("Calling found peer:", peerId);
+                        initiateCall(peerId);
+                        foundPartner = true;
+                        
+                        // Clear them from lobby so others don't call them
+                        lobby.get(key).put(null); 
+                    }
+                }
+            });
+
+            // If we didn't call anyone, Put OURSELVES in the lobby
+            setTimeout(() => {
+                if (!foundPartner && !connected) {
+                    statusMsg.innerHTML = '<span class="text-[#00ff41]">ADVERTISING PRESENCE...</span>';
+                    // Store my ID in the mesh
+                    lobby.get(myId).put(myId);
+                }
+            }, 1500);
+        }
+
+        function initiateCall(partnerId) {
+            connected = true;
+            statusMsg.innerText = "ESTABLISHING LINK...";
+            const call = peer.call(partnerId, localStream);
+            handleStream(call);
+        }
+
+        function answerCall(call) {
+            connected = true;
+            statusMsg.innerText = "INCOMING LINK...";
+            
+            // Remove myself from lobby instantly so I don't get double called
+            lobby.get(myId).put(null);
+            
+            call.answer(localStream);
+            handleStream(call);
+        }
+
+        function handleStream(call) {
+            call.on('stream', (stream) => {
+                statusMsg.classList.add('hidden');
+                remoteVideo.srcObject = stream;
+            });
+            call.on('close', () => location.reload());
+            call.on('error', () => location.reload());
+        }
+
+        // Cleanup on close
+        window.onbeforeunload = function() {
+            if(myId) lobby.get(myId).put(null);
+        }
+    </script>
+</body>
+</html>
