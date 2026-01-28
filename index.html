@@ -2,147 +2,198 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Magic Link Video</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Random Video Chat</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+    
     <style>
-        body { background: #111; color: white; font-family: sans-serif; }
-        video { transform: scaleX(-1); background: #000; border-radius: 8px; object-fit: cover; }
-        .glass { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.2); }
+        body { background-color: #000; color: white; font-family: sans-serif; overflow: hidden; }
+        /* Mobile-friendly video sizing */
+        .video-container { position: relative; width: 100vw; height: 50vh; overflow: hidden; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        #localVideo { transform: scaleX(-1); } /* Mirror effect */
+        
+        /* Floating controls */
+        .controls {
+            position: absolute; bottom: 20px; left: 0; right: 0; 
+            display: flex; justify-content: center; gap: 10px; z-index: 50;
+        }
+        
+        .btn {
+            background: #2563eb; color: white; padding: 12px 24px; 
+            border-radius: 50px; font-weight: bold; border: none;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .btn-stop { background: #dc2626; }
     </style>
 </head>
-<body class="h-screen flex flex-col items-center justify-center p-4">
+<body>
 
-    <div id="status" class="fixed top-4 bg-blue-600 px-4 py-2 rounded-full text-sm font-bold shadow-lg z-50">
-        Initializing...
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-5xl h-[70vh]">
-        <div class="relative w-full h-full glass rounded-xl overflow-hidden">
-            <video id="localVideo" autoplay muted playsinline class="w-full h-full"></video>
-            <div class="absolute bottom-4 left-4 bg-black/50 px-3 py-1 rounded text-sm">YOU</div>
-        </div>
-
-        <div class="relative w-full h-full glass rounded-xl overflow-hidden flex items-center justify-center">
-            <video id="remoteVideo" autoplay playsinline class="w-full h-full"></video>
-            <div id="waitingMsg" class="absolute text-center">
-                <p class="text-gray-400 animate-pulse">Waiting for connection...</p>
+    <div class="video-container border-b border-gray-800">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <div id="status" class="absolute inset-0 flex items-center justify-center bg-gray-900/90 z-10 text-center p-4">
+            <div>
+                <h1 class="text-2xl font-bold mb-2">Random Chat</h1>
+                <p class="text-gray-400 text-sm">Connects automatically.</p>
             </div>
         </div>
     </div>
 
-    <div id="hostControls" class="mt-8 hidden flex-col items-center gap-4">
-        <p class="text-gray-400">Send this link to your friend to start:</p>
-        <div class="flex gap-2">
-            <input id="shareLink" readonly class="bg-gray-800 text-green-400 px-4 py-2 rounded border border-gray-600 w-64 text-sm">
-            <button onclick="copyLink()" class="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded font-bold transition">
-                COPY LINK
-            </button>
-        </div>
+    <div class="video-container">
+        <video id="localVideo" autoplay muted playsinline></video>
+        <div class="absolute bottom-2 right-2 bg-black/50 px-2 rounded text-xs">YOU</div>
+    </div>
+
+    <div class="controls">
+        <button id="startBtn" onclick="startApp()" class="btn">FIND MATCH</button>
+        <button id="stopBtn" onclick="location.reload()" class="btn btn-stop hidden">NEXT / STOP</button>
     </div>
 
     <script>
-        // 1. Setup PeerJS with Google's Free STUN servers (Fixes network blocks)
+        // --- CONFIGURATION ---
+        // 1. Google STUN servers (Crucial for Mobile)
         const peerConfig = {
-            debug: 2,
+            debug: 1,
             config: {
                 iceServers: [
                     { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' }
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' },
+                    { urls: 'stun:stun4.l.google.com:19302' }
                 ]
             }
         };
 
-        const peer = new Peer(null, peerConfig);
-        let localStream;
-        
-        // Check URL for "call" ID
-        const urlParams = new URLSearchParams(window.location.search);
-        const targetId = urlParams.get('call');
+        // 2. Initialize Gun (The "Serverless" Lobby)
+        const gun = Gun(['https://gun-manhattan.herokuapp.com/gun']);
+        // Use a unique room name to avoid conflicts
+        const lobby = gun.get('random_video_lobby_v2'); 
 
-        // UI Elements
+        // Variables
+        let peer, localStream, myId;
+        let isConnected = false;
         const statusEl = document.getElementById('status');
-        const hostControls = document.getElementById('hostControls');
-        const shareInput = document.getElementById('shareLink');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
 
-        // --- STARTUP ---
-        async function init() {
+        // --- APP LOGIC ---
+
+        async function startApp() {
+            startBtn.classList.add('hidden');
+            statusEl.innerHTML = '<p class="animate-pulse">Accessing Camera...</p>';
+
             try {
-                // Get Camera/Mic
+                // 1. Get Camera (Mobile requires user interaction first, which is why we use a button)
                 localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
                 document.getElementById('localVideo').srcObject = localStream;
-                statusEl.innerText = "Camera Ready. Connecting to Cloud...";
 
-                // Handle PeerJS ID generation
+                // 2. Start PeerJS
+                statusEl.innerHTML = '<p class="animate-pulse">Connecting to Network...</p>';
+                peer = new Peer(null, peerConfig);
+
                 peer.on('open', (id) => {
-                    console.log("My ID: " + id);
-                    
-                    if (targetId) {
-                        // SCENARIO A: I am the GUEST (I clicked a link)
-                        statusEl.innerText = "Connecting to friend...";
-                        connectToHost(targetId);
-                    } else {
-                        // SCENARIO B: I am the HOST (I need to share a link)
-                        statusEl.innerText = "Waiting for friend to join...";
-                        hostControls.classList.remove('hidden');
-                        
-                        // Create the Magic Link
-                        const magicLink = window.location.origin + window.location.pathname + '?call=' + id;
-                        shareInput.value = magicLink;
-                        
-                        // Listen for incoming call
-                        peer.on('call', answerCall);
-                    }
+                    myId = id;
+                    console.log("My ID:", myId);
+                    joinLobby();
+                });
+
+                peer.on('call', (call) => {
+                    console.log("Receiving call...");
+                    answerCall(call);
                 });
 
                 peer.on('error', (err) => {
                     console.error(err);
-                    statusEl.innerText = "Error: " + err.type;
-                    statusEl.className = "fixed top-4 bg-red-600 px-4 py-2 rounded-full text-sm font-bold shadow-lg z-50";
+                    statusEl.innerHTML = '<p class="text-red-500">Connection Failed.<br>Try switching to WiFi.</p>';
                 });
 
             } catch (err) {
-                statusEl.innerText = "Camera Access Denied! Allow permissions.";
-                statusEl.className = "fixed top-4 bg-red-600 px-4 py-2 rounded-full text-sm font-bold shadow-lg z-50";
+                alert("Camera blocked! Please allow access in browser settings.");
+                location.reload();
             }
         }
 
-        // --- LOGIC ---
+        function joinLobby() {
+            statusEl.innerHTML = '<p class="animate-pulse text-blue-400">Searching for stranger...</p>';
+            
+            // 1. Look for someone waiting
+            let found = false;
+            
+            // Read data from Gun.js once
+            lobby.map().once((peerId, key) => {
+                if (found || isConnected) return;
+                
+                // If we found a valid ID that isn't ours
+                if (peerId && peerId !== myId && peerId.length > 2) {
+                    console.log("Found user:", peerId);
+                    found = true;
+                    
+                    // Clear them from lobby (so 3rd person doesn't call them)
+                    lobby.get(key).put(null); 
+                    
+                    // Call them
+                    initiateCall(peerId);
+                }
+            });
 
-        // Guest calls Host
-        function connectToHost(hostId) {
-            const call = peer.call(hostId, localStream);
+            // 2. If nobody found after 2 seconds, put MYSELF in lobby
+            setTimeout(() => {
+                if (!found && !isConnected) {
+                    statusEl.innerHTML = '<p class="animate-pulse text-green-400">Waiting for someone to join...</p>';
+                    // Announce myself
+                    lobby.get(myId).put(myId);
+                    
+                    // Auto-cleanup: remove myself if I disconnect
+                    window.addEventListener('beforeunload', () => {
+                        lobby.get(myId).put(null);
+                    });
+                }
+            }, 2000);
+        }
+
+        // --- CALL HANDLING ---
+
+        function initiateCall(partnerId) {
+            isConnected = true;
+            statusEl.innerHTML = '<p>Connecting...</p>';
+            const call = peer.call(partnerId, localStream);
             handleStream(call);
         }
 
-        // Host answers Guest
         function answerCall(call) {
-            hostControls.classList.add('hidden'); // Hide link once connected
-            statusEl.innerText = "Friend calling... Connecting...";
+            if (isConnected) return; // Already in a call
+            isConnected = true;
+            
+            // Remove myself from lobby immediately
+            lobby.get(myId).put(null);
+            
+            statusEl.innerHTML = '<p>Connecting...</p>';
             call.answer(localStream);
             handleStream(call);
         }
 
-        // Handle the video stream
         function handleStream(call) {
             call.on('stream', (remoteStream) => {
-                statusEl.innerText = "Connected! ✅";
-                statusEl.className = "fixed top-4 bg-green-600 px-4 py-2 rounded-full text-sm font-bold shadow-lg z-50";
+                // SUCCESS!
+                statusEl.classList.add('hidden'); // Remove overlay
+                stopBtn.classList.remove('hidden'); // Show stop button
                 document.getElementById('remoteVideo').srcObject = remoteStream;
-                document.getElementById('waitingMsg').classList.add('hidden');
+            });
+
+            call.on('close', () => {
+                alert("Stranger disconnected.");
+                location.reload();
             });
             
-            call.on('close', () => alert("Call Ended"));
+            // Wait 10 seconds. If no stream, connection likely failed (NAT issue).
+            setTimeout(() => {
+                if(document.getElementById('remoteVideo').paused) {
+                    // statusEl.innerHTML = '<p class="text-red-400">Connection stuck.<br>Try reloading.</p>';
+                }
+            }, 10000);
         }
-
-        function copyLink() {
-            shareInput.select();
-            document.execCommand("copy");
-            alert("Link Copied! Send it to your friend.");
-        }
-
-        init();
     </script>
 </body>
 </html>
